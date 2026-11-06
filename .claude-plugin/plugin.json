@@ -7,6 +7,9 @@
   },
   "homepage": "https://github.com/ClariSortAi/cleanroom",
   "repository": "https://github.com/ClariSortAi/cleanroom",
+  "documentationUrl": "https://github.com/ClariSortAi/cleanroom#readme",
+  "supportUrl": "https://github.com/ClariSortAi/cleanroom/issues",
+  "privacyPolicyUrl": "https://github.com/ClariSortAi/cleanroom#data-and-privacy",
   "license": "MIT",
   "keywords": ["context", "tokens", "mcp", "skills", "plugins", "audit", "harness"]
 }
