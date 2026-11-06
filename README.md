@@ -51,7 +51,8 @@ To forecast a plan, it passes the proposed switches as a temporary `--settings` 
 Two things `/context` does not show directly, and how cleanroom handles them:
 
 - Deferred MCP tools are listed by name in every request, but `/context` does not count that list. cleanroom estimates it from the tool names and reports it on a separate line. A server with 207 tools adds about 2,300 tokens this way.
-- Skill descriptions share a fixed budget (about 1.5% of the context window). With many skills installed, most are listed by name only. Switching off skills then saves few tokens, because the remaining skills expand into the freed space. The forecast says when this happens and reports how many skills went from name-only back to a full description.
+- Skill descriptions share a fixed budget (about 1.5% of the context window). With many skills installed, some are listed by name only, and the listing is full. Switching a skill off then saves no tokens, because the remaining skills expand into the freed space. cleanroom detects a full listing, reports each skill's saving as 0, and asks about a borderline skill only when it could trigger wrongly in your project. It still switches off clear mismatches, because they crowd the listing and push out descriptions you do want. The forecast splits the saving into plugins and MCP servers versus skills, and reports how many skills went from name-only back to a full description.
+- The skill listing is counted partly under Skills and partly under System tools in `/context`, and it moves between the two as skills are removed. The forecast shows them as one row so the shift doesn't look like a new cost.
 
 ## What it changes
 
@@ -66,6 +67,19 @@ Everything goes into one file, `<project>/.claude/settings.local.json`:
 Each change is logged under `~/.claude/cleanroom/<project>/undo.json`. `restore` reverts exactly those keys. If you edited one of them by hand after the audit, restore leaves your value in place.
 
 A denied MCP server can't be switched back on from the `/mcp` menu in that project. Use `restore`, or delete its entry from `deniedMcpServers`.
+
+## Switching things off everywhere
+
+If an audit switches off a lot, or your other repos already switch off the same items, the summary adds a "Switch these off everywhere" section. It lists the items that look irrelevant across your whole account and how to switch each kind off once instead of repo by repo:
+
+| Item | Off everywhere | Back on in one repo |
+|---|---|---|
+| Plugin | `"enabledPlugins": { "<id>": false }` in `~/.claude/settings.json` | `"<id>": true` in that repo's `.claude/settings.local.json` |
+| Skill | `"skillOverrides": { "<name>": "off" }` in `~/.claude/settings.json` | `"<name>": "on"` in that repo's `.claude/settings.local.json` |
+| User-scope MCP server | `claude mcp remove <name> --scope user` (save `claude mcp get <name>` first) | `claude mcp add ... --scope local` in that repo |
+| claude.ai connector | a `deniedMcpServers` entry in `~/.claude/settings.json`, or `"disableClaudeAiConnectors": true` for all of them | not possible: deny lists merge across scopes |
+
+For plugins and skills, the audit can make the change for you if you say yes. It writes `~/.claude/settings.json` and logs the change, and `/cleanroom:audit restore` offers to undo user-scope changes as well. MCP servers and connectors stay manual, because a user-level deny can't be lifted for a single repo and moving a server between scopes means re-adding its config.
 
 ## What it never touches
 
@@ -93,7 +107,7 @@ claude --plugin-dir .         load this checkout in a session
 node scripts/cleanroom.mjs inventory --project <dir> --fast
 ```
 
-The CLI has four commands: `inventory`, `forecast`, `apply` and `restore`. `forecast` and `apply` need the `--inv <id>` printed in the inventory header, because refs like `S12` are renumbered on every inventory.
+The CLI has four commands: `inventory`, `forecast`, `apply` and `restore`. `forecast` and `apply` need the `--inv <id>` printed in the inventory header, because refs like `S12` are renumbered on every inventory. `apply` and `restore` take `--scope user` for the account-wide path; user-scope undo logs live in `~/.claude/cleanroom/_user/`.
 
 Set `CLEANROOM_CLAUDE_BIN` if `claude` is not on your PATH.
 
