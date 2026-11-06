@@ -90,6 +90,26 @@ For plugins and skills, the audit can make the change for you if you say yes. It
 - Items declared for the project itself (project skills, `.mcp.json` servers, plugins enabled in project settings). The audit can ask about these, but never removes them on its own.
 - Anything in an empty project. With no signals to judge by, it only asks.
 
+## Data and privacy
+
+cleanroom runs on your machine. The script makes no network requests of its own, and `/context` is answered locally, so the measuring runs send nothing to a model. Each run does start Claude Code, which connects to your configured MCP servers the same way any session in that project would.
+
+It reads:
+
+- From this project: the file list, manifest dependencies, the first 2,500 characters of CLAUDE.md (or AGENTS.md) and 1,500 of the README, the `origin` URL with any credentials removed, and the last 12 commit subjects.
+- `~/.claude.json`, for your projects and their MCP server settings. The report shows a server's type, host and command. It leaves out headers, environment variables, and keys or tokens in URLs and arguments.
+- Settings files: `~/.claude/settings.json`, this project's `.claude/settings.json` and `.claude/settings.local.json`, and the same two files in up to 400 other projects listed in `~/.claude.json`. That's how it spots items you already switch off elsewhere.
+- The `SKILL.md` and manifest files of your installed skills and plugins, for their descriptions.
+
+It writes:
+
+- `<project>/.claude/settings.local.json`, with the switches.
+- `~/.claude/settings.json`, only after you say yes to switching items off everywhere.
+- `~/.claude/cleanroom/`, with the inventory, forecast and undo logs. They stay until you delete the folder, and `restore` needs the undo logs.
+- A temporary settings file in your system temp folder during each measuring run, deleted when the run ends.
+
+The audit report goes into your Claude Code conversation like any other command output, so the model in your session sees what it lists.
+
 ## Things to know
 
 - The measuring runs start Claude Code headlessly in your project, so they load the project's hooks and `.mcp.json` servers, the same as opening a session there. Run the audit only in projects you trust. Pass `--no-hooks` to the CLI to skip hooks (plugin hook costs are then not counted).
