@@ -90,7 +90,8 @@ test('mcp helpers sanitize names and estimate deferred name cost', () => {
 });
 
 test('describeMcpConfig never leaks secrets', () => {
-  assert.equal(describeMcpConfig({ url: 'https://api.example.com/mcp?key=SECRET', headers: { Authorization: 'Bearer x' } }), 'http api.example.com');
+  assert.equal(describeMcpConfig({ url: 'https://api.example.com/mcp?key=SECRET', headers: { Authorization: 'Bearer x' } }), 'remote api.example.com');
+  assert.equal(describeMcpConfig({ type: 'http', url: 'https://api.example.com/mcp' }), 'http api.example.com');
   const d = describeMcpConfig({ command: 'C:\\tools\\node.exe', args: ['C:\\srv\\index.js', '--api-key=SECRET', 'abcdefghijklmnopqrstuvwxyz0123456789ABCD', '--token', '/c'], env: { TOKEN: 'x' } });
   assert.ok(!/SECRET|abcdefghij|token/i.test(d), d);
   assert.match(d, /^stdio node\.exe index\.js/);

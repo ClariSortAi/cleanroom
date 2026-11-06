@@ -475,10 +475,10 @@ export function describeMcpConfig(cfg) {
   if (!cfg) return '';
   if (cfg.url) {
     try {
-      return `${cfg.type || 'http'} ${new URL(cfg.url).host}`;
+      return `${cfg.type || 'remote'} ${new URL(cfg.url).host}`;
     } catch (e) {
       warn('MCP server has an unparseable url', e);
-      return cfg.type || 'http';
+      return cfg.type || 'remote';
     }
   }
   if (cfg.command) {
