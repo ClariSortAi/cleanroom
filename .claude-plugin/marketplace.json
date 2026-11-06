@@ -1,0 +1,16 @@
+{
+  "name": "cleanroom",
+  "owner": {
+    "name": "Jason Rivard"
+  },
+  "metadata": {
+    "description": "cleanroom: per-project context trimming for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "cleanroom",
+      "source": "./",
+      "description": "Trim per-project context overhead from plugins, MCP servers and skills, with measured token savings."
+    }
+  ]
+}
