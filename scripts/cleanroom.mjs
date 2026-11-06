@@ -291,6 +291,10 @@ async function pool(items, limit, fn) {
 /* Project and harness discovery                                       */
 /* ------------------------------------------------------------------ */
 
+export function userStateDir() {
+  return path.join(HOME, '.claude', SELF, '_user');
+}
+
 export function stateDir(projectDir) {
   const slug = path.resolve(projectDir).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return path.join(HOME, '.claude', SELF, slug);
@@ -557,7 +561,10 @@ function buildItems(projectDir, run) {
     });
   }
 
-  // Standalone skills and commands
+  // Standalone skills and commands. When any skill is listed by name only, the
+  // listing is at its budget: switching a skill off frees room for the others'
+  // descriptions but saves no tokens, so its marginal cost is 0.
+  const listingFull = ctx.skills.some(s => s.below);
   const initSkills = init.skills || [];
   for (const s of ctx.skills) {
     if (s.source.startsWith('Plugin (')) continue;
@@ -571,8 +578,8 @@ function buildItems(projectDir, run) {
     if (!d) warn(`no description found for skill ${key}`);
     items.push({
       kind: 'skill', key, name: key, scope: s.source === 'claude.ai sync' ? 'claude.ai' : s.source.toLowerCase(),
-      contextTokens: s.tokens, nameTokens: 0,
-      tokens: s.tokens, approx: s.approx, below: s.below, measured: true,
+      contextTokens: listingFull ? 0 : s.tokens, nameTokens: 0, listingShare: s.tokens,
+      tokens: listingFull ? 0 : s.tokens, approx: s.approx, below: s.below, measured: true, listingFull,
       askOnly: s.source === 'Project',
       desc: oneLine(d?.desc || '', 260),
     });
@@ -584,7 +591,55 @@ function buildItems(projectDir, run) {
   const counters = { plugin: 0, mcp: 0, skill: 0 };
   const prefix = { plugin: 'P', mcp: 'M', skill: 'S' };
   for (const it of items) it.ref = `${prefix[it.kind]}${++counters[it.kind]}`;
-  return { items, info };
+  return { items, info, listingFull };
+}
+
+/** Every item a settings object switches off, as "kind:key" strings. */
+export function offKeysFromSettings(settings) {
+  const keys = [];
+  for (const [id, on] of Object.entries(settings?.enabledPlugins || {})) if (on === false) keys.push(`plugin:${id}`);
+  for (const [name, v] of Object.entries(settings?.skillOverrides || {})) if (v === 'off') keys.push(`skill:${name}`);
+  for (const d of Array.isArray(settings?.deniedMcpServers) ? settings.deniedMcpServers : []) {
+    if (d?.serverName) keys.push(`mcp:${d.serverName}`);
+  }
+  return keys;
+}
+
+function countKinds(keys) {
+  const c = { plugin: 0, mcp: 0, skill: 0 };
+  for (const k of keys) c[k.split(':')[0]]++;
+  return c;
+}
+
+/**
+ * What this repo already switches off, and which items other known repos
+ * switch off (project settings files plus /mcp toggles in ~/.claude.json).
+ */
+function accountSignals(projectDir) {
+  const here = path.resolve(projectDir).toLowerCase();
+  const files = settingsFiles(projectDir);
+  const existing = {
+    'settings.json': countKinds(offKeysFromSettings(readJson(files.project, {}))),
+    'settings.local.json': countKinds(offKeysFromSettings(readJson(files.local, {}))),
+  };
+  const claudeJson = readJson(path.join(HOME, '.claude.json'), {});
+  const elsewhere = new Map();
+  let scanned = 0;
+  for (const [p, entry] of Object.entries(claudeJson.projects || {}).slice(0, 400)) {
+    const dir = path.resolve(p);
+    if (dir.toLowerCase() === here || !fs.existsSync(dir)) continue;
+    scanned++;
+    const keys = new Set([
+      ...offKeysFromSettings(readJson(path.join(dir, '.claude', 'settings.json'), {})),
+      ...offKeysFromSettings(readJson(path.join(dir, '.claude', 'settings.local.json'), {})),
+      ...(entry?.disabledMcpServers || []).map(n => `mcp:${n}`),
+    ]);
+    for (const k of keys) {
+      if (!elsewhere.has(k)) elsewhere.set(k, []);
+      elsewhere.get(k).push(path.basename(dir));
+    }
+  }
+  return { existing, scanned, elsewhere };
 }
 
 export function overlayFor(items) {
@@ -632,8 +687,12 @@ function renderInventory(inv) {
   L.push(`Git: ${fp.git ? `yes${fp.remote ? `, origin ${fp.remote}` : ', no origin'}` : 'no'} | tracked files: ${fp.fileCount}${fp.empty ? ' | EMPTY PROJECT: auto-remove nothing' : ''}`);
   const names = items.reduce((a, it) => a + (it.nameTokens || 0), 0);
   L.push(`Always-on context now: ${fmtTok(baseline.used)} of ${fmtTok(baseline.window)} (${categoriesLine(baseline)})${names ? ` + ~${fmtTok(names)} deferred MCP tool names that /context does not count` : ''}`);
+  L.push(inv.listingFull
+    ? `Skill listing: FULL. ${baseline.skillsNameOnly} of ${baseline.skillsListed} skills are listed by name only. Switching a skill off frees description room for the others but saves no tokens, so every skill's marginal cost below is 0.`
+    : `Skill listing: fits its budget. Switching a skill off saves the tokens shown.`);
   L.push(`State folder: ${state}`);
   if (previous) L.push(`Earlier cleanroom changes still active in this project: ${previous} (undo with: restore)`);
+  if (inv.previousUser) L.push(`Earlier cleanroom changes active at user scope (all projects): ${inv.previousUser} (undo with: restore --scope user)`);
   L.push('', '## Project signals');
   L.push(`Top level: ${fp.topLevel.join('  ') || '(nothing)'}`);
   if (fp.extensions.length) L.push(`File types: ${fp.extensions.join(', ')}`);
@@ -642,11 +701,20 @@ function renderInventory(inv) {
   if (fp.claudeMd) L.push('', `### ${fp.claudeMd.file} (head)`, '```', fp.claudeMd.head.trim(), '```');
   if (fp.readme) L.push('', `### ${fp.readme.file} (head)`, '```', fp.readme.head.trim(), '```');
   L.push('', '## Candidates');
-  L.push('Format: ref | kind | scope | always-on tokens per request | name: what it is. `ask-only` = declared for this project; never auto-remove.');
-  L.push('Skill numbers are each skill\'s share of a fixed listing budget: removing one skill frees little, removing many shrinks the listing and un-truncates the rest. Plugin/MCP numbers were measured one at a time.', '');
+  L.push('Format: ref | kind | scope | tokens saved per request if switched off | name: what it is. `ask-only` = declared for this project; never auto-remove. `off in N other repos` = already switched off there.');
+  L.push(inv.listingFull
+    ? 'Skills show 0 because the listing is full (their current share of the listing is in brackets). Plugin/MCP numbers were measured one at a time.'
+    : 'Skill numbers are each skill\'s listing tokens. Plugin/MCP numbers were measured one at a time.', '');
   for (const it of items) {
-    const tok = it.below ? `<${it.below}` : `${fmtTok(it.tokens, it.approx)}${it.nameTokens ? ` (incl. ~${fmtTok(it.nameTokens)} tool names)` : ''}`;
-    const flags = [it.askOnly ? 'ask-only' : '', it.noisy ? 'noisy-measure' : '', it.measured ? '' : 'estimated', it.status && it.status !== 'connected' ? `status ${it.status}` : ''].filter(Boolean).join(', ');
+    let tok;
+    if (it.kind === 'skill' && it.listingFull) tok = `0 (listing full; share ${it.below ? `<${it.below}` : fmtTok(it.listingShare, it.approx)})`;
+    else if (it.below) tok = `<${it.below}`;
+    else tok = `${fmtTok(it.tokens, it.approx)}${it.nameTokens ? ` (incl. ~${fmtTok(it.nameTokens)} tool names)` : ''}`;
+    const flags = [
+      it.askOnly ? 'ask-only' : '', it.noisy ? 'noisy-measure' : '', it.measured ? '' : 'estimated',
+      it.status && it.status !== 'connected' ? `status ${it.status}` : '',
+      it.offIn?.length ? `off in ${it.offIn.length} other repos` : '',
+    ].filter(Boolean).join(', ');
     const onDemand = it.onDemand ? ` | +${fmtTok(it.onDemand)} on demand` : '';
     L.push(`${it.ref} | ${it.kind} | ${it.scope} | ${tok}${onDemand}${flags ? ` | ${flags}` : ''} | ${it.name}: ${it.desc || '(no description)'}${it.detail ? ` [${it.detail}]` : ''}`);
   }
@@ -657,6 +725,18 @@ function renderInventory(inv) {
   if (info.agents.length) L.push(`- Custom agents: ${info.agents.map(a => `${a.name} (${a.source}, ${fmtTok(a.tokens)})`).join(', ')}`);
   if (info.memory.length) L.push(`- Memory files: ${info.memory.map(m => `${m.path} (${fmtTok(m.tokens)})`).join(', ')}`);
   if (info.inlinePlugins.length) L.push(`- Plugins loaded by a launch flag: ${info.inlinePlugins.map(p => p.name).join(', ')}`);
+  if (inv.signals) {
+    const fmtCounts = c => `${c.plugin} plugins, ${c.mcp} MCP servers, ${c.skill} skills`;
+    const ex = inv.signals.existing;
+    const existingTotal = Object.values(ex).reduce((a, c) => a + c.plugin + c.mcp + c.skill, 0);
+    const repeat = items.filter(it => (it.offIn?.length || 0) >= 2);
+    L.push('', '## Account-wide signals');
+    L.push(`- Already switched off in this repo: .claude/settings.json: ${fmtCounts(ex['settings.json'])}; .claude/settings.local.json: ${fmtCounts(ex['settings.local.json'])} (total ${existingTotal})`);
+    L.push(`- Other repos scanned: ${inv.signals.scanned}`);
+    L.push(repeat.length
+      ? `- Candidates already off in 2+ other repos: ${repeat.map(it => `${it.ref} ${it.name} (${it.offIn.length})`).join(', ')}`
+      : '- No candidate is switched off in 2+ other repos.');
+  }
   if (warnings.length) L.push('', '## Warnings', ...warnings.map(w => `- ${w}`));
   return L.join('\n');
 }
@@ -668,11 +748,19 @@ async function cmdInventory(projectDir, opts) {
   const runOpts = { noHooks: !!opts['no-hooks'], waitMs: Number.isFinite(waitSec) && waitSec >= 0 ? waitSec * 1000 : DEFAULT_WAIT_MS };
   process.stderr.write(`[cleanroom] measuring the current context with /context (no model call; waits ${runOpts.waitMs / 1000}s for MCP servers)\n`);
   const run = await runContext(projectDir, {}, runOpts);
-  const { items, info } = buildItems(projectDir, run);
+  const pending = (run.init.mcp_servers || []).filter(m => m.status === 'pending').map(m => m.name);
+  if (pending.length) {
+    warn(`MCP servers still connecting when measured: ${pending.join(', ')}. Their tools are not counted; re-run inventory with --wait 45 for a full count`);
+  }
+  const { items, info, listingFull } = buildItems(projectDir, run);
   if (!opts.fast) await measureEach(projectDir, run.ctx.used, items, runOpts);
   const fp = fingerprint(projectDir);
   const undo = readJson(path.join(state, 'undo.json'), []);
   const previous = undo.reduce((a, b) => a + b.changes.length, 0);
+  const userUndo = readJson(path.join(userStateDir(), 'undo.json'), []);
+  const previousUser = userUndo.reduce((a, b) => a + b.changes.length, 0);
+  const signals = accountSignals(projectDir);
+  for (const it of items) it.offIn = signals.elsewhere.get(`${it.kind}:${it.key}`) || [];
   const inv = {
     id: Date.now().toString(36).slice(-6),
     createdAt: new Date().toISOString(), projectDir, noHooks: runOpts.noHooks, waitMs: runOpts.waitMs, fp,
@@ -680,7 +768,8 @@ async function cmdInventory(projectDir, opts) {
       used: run.ctx.used, window: run.ctx.window, categories: run.ctx.categories,
       skillsListed: run.ctx.skills.length, skillsNameOnly: run.ctx.skills.filter(s => s.below).length,
     },
-    items, info, state, previous,
+    listingFull, items, info, state, previous, previousUser,
+    signals: { existing: signals.existing, scanned: signals.scanned },
   };
   fs.writeFileSync(path.join(state, 'inventory.json'), JSON.stringify(inv, null, 2));
   console.log(renderInventory(inv));
@@ -716,26 +805,37 @@ export function resolveRefs(inv, refsArg) {
 async function cmdForecast(projectDir, opts) {
   const inv = loadInventory(projectDir, opts.inv);
   const chosen = resolveRefs(inv, opts.disable);
-  const run = await runContext(projectDir, overlayFor(chosen), { noHooks: inv.noHooks, waitMs: inv.waitMs ?? DEFAULT_WAIT_MS });
+  const nonSkill = chosen.filter(it => it.kind !== 'skill');
+  const skills = chosen.filter(it => it.kind === 'skill');
+  const runOpts = { noHooks: inv.noHooks, waitMs: inv.waitMs ?? DEFAULT_WAIT_MS };
+  // Measure plugins/MCP alone as well as the full plan, so the saving can be split by kind.
+  const [full, nonSkillRun] = await Promise.all([
+    runContext(projectDir, overlayFor(chosen), runOpts),
+    nonSkill.length && skills.length ? runContext(projectDir, overlayFor(nonSkill), runOpts) : null,
+  ]);
   const before = inv.baseline;
-  const after = run.ctx;
+  const after = full.ctx;
   const measured = Math.max(0, before.used - after.used);
-  const names = chosen.reduce((a, it) => a + (it.nameTokens || 0), 0);
+  let measuredNonSkill = nonSkill.length ? measured : 0;
+  let measuredSkills = skills.length ? measured : 0;
+  if (nonSkillRun) {
+    measuredNonSkill = Math.max(0, before.used - nonSkillRun.ctx.used);
+    measuredSkills = Math.max(0, nonSkillRun.ctx.used - after.used);
+  }
+  const names = nonSkill.reduce((a, it) => a + (it.nameTokens || 0), 0);
   const saved = measured + names;
   const pct = before.used ? Math.round((saved / (before.used + inv.items.reduce((a, it) => a + (it.nameTokens || 0), 0))) * 100) : 0;
-  const onDemandDropped = chosen.reduce((a, it) => a + (it.onDemand || 0), 0);
+  const onDemandDropped = nonSkill.reduce((a, it) => a + (it.onDemand || 0), 0);
   const result = {
     createdAt: new Date().toISOString(), disabled: chosen.map(it => it.ref),
     before: before.used, after: after.used, window: before.window, measured, names, saved, pct,
+    byKind: { pluginsAndMcp: measuredNonSkill + names, skills: measuredSkills },
     perSession: saved * SESSION_REQUESTS, onDemandDropped,
     skills: {
       listedBefore: before.skillsListed, listedAfter: after.skills.length,
       nameOnlyBefore: before.skillsNameOnly, nameOnlyAfter: after.skills.filter(s => s.below).length,
     },
-    categories: Object.keys({ ...before.categories, ...after.categories })
-      .filter(k => !['Free space', 'Autocompact buffer'].includes(k))
-      .map(k => ({ name: k, before: before.categories[k] || 0, after: after.categories[k] || 0 }))
-      .filter(c => c.before !== c.after),
+    categories: categoryRows(before.categories, after.categories),
   };
   fs.writeFileSync(path.join(inv.state, 'forecast.json'), JSON.stringify(result, null, 2));
   const L = ['# Forecast (measured with /context)', ''];
@@ -743,27 +843,52 @@ async function cmdForecast(projectDir, opts) {
   L.push(`Measured by /context: ${fmtTok(before.used)} -> ${fmtTok(after.used)} (${fmtTok(measured)} less)`);
   if (names) L.push(`Deferred MCP tool names /context does not count (estimated): ~${fmtTok(names)}`);
   L.push(`Total: ~${fmtTok(saved)} fewer always-on tokens on every request (${pct}% of the always-on load)`);
+  if (nonSkill.length) L.push(`- From ${nonSkill.length} plugins/MCP servers: ~${fmtTok(result.byKind.pluginsAndMcp)}`);
+  if (skills.length) L.push(`- From ${skills.length} skills: ~${fmtTok(measuredSkills)}`);
   L.push(`Context window freed: ${before.window ? ((saved / before.window) * 100).toFixed(1) : '?'}% of ${fmtTok(before.window)}`);
   L.push(`Per ${SESSION_REQUESTS}-request session: ~${fmtTok(saved * SESSION_REQUESTS)} fewer input tokens (mostly cache reads)`);
   if (onDemandDropped) L.push(`On-demand MCP tool schemas no longer reachable: ${fmtTok(onDemandDropped)} (only paid when a tool is loaded)`);
   const sk = result.skills;
-  if (chosen.some(it => it.kind === 'skill') && sk.listedBefore != null) {
+  if (skills.length && sk.listedBefore != null) {
     L.push(`Skills listed: ${sk.listedBefore} -> ${sk.listedAfter}; listed by name only because the description budget ran out: ${sk.nameOnlyBefore} -> ${sk.nameOnlyAfter}`);
-    // The skill listing is counted partly under "Skills" and partly under "System tools".
-    const listing = c => (c.Skills || 0) + (c['System tools'] || 0);
-    if (listing(before.categories) - listing(after.categories) < 200) {
-      L.push('The skill listing is still at its budget, so removed skills freed room for fuller descriptions of the remaining ones instead of saving tokens.');
+    if (measuredSkills < 200) {
+      L.push('The skill listing is still at its budget, so the switched-off skills freed room for fuller descriptions of the remaining ones instead of saving tokens.');
     }
   }
   if (result.categories.length) {
     L.push('', '| Category | Before | After |', '|---|---|---|');
     for (const c of result.categories) L.push(`| ${c.name} | ${fmtTok(c.before)} | ${fmtTok(c.after)} |`);
+    const shifted = ['Skills', 'System tools'].some(k => (before.categories[k] || 0) !== (after.categories[k] || 0));
+    if (shifted) {
+      L.push('', 'The skill listing is counted partly under Skills and partly under System tools, and shifts between them as skills are removed, so the two are shown as one row.');
+    }
   }
-  L.push('', 'Per item (measured alone; the combined total above is the authoritative number):');
-  for (const it of chosen) L.push(`- ${it.ref} ${it.kind} ${it.name}: ${it.below ? `<${it.below}` : fmtTok(it.tokens, it.approx)}`);
-  L.push('', 'Note: skill descriptions share a listing budget, so removing skills lets the remaining ones show fuller descriptions. That is why per-item numbers do not add up exactly.');
+  L.push('', 'Per item (measured alone; the totals above are the authoritative numbers):');
+  for (const it of chosen) {
+    const tok = it.kind === 'skill' && inv.listingFull ? '0 (listing full)' : it.below ? `<${it.below}` : fmtTok(it.tokens, it.approx);
+    L.push(`- ${it.ref} ${it.kind} ${it.name}: ${tok}`);
+  }
   if (warnings.length) L.push('', '## Warnings', ...warnings.map(w => `- ${w}`));
   console.log(L.join('\n'));
+}
+
+/** Before/after rows for changed categories, with Skills + System tools merged into one row. */
+export function categoryRows(before, after) {
+  const LISTING = 'Skills + System tools (skill listing)';
+  const merge = c => {
+    const out = {};
+    for (const [k, v] of Object.entries(c || {})) {
+      if (['Free space', 'Autocompact buffer'].includes(k)) continue;
+      const key = k === 'Skills' || k === 'System tools' ? LISTING : k;
+      out[key] = (out[key] || 0) + v;
+    }
+    return out;
+  };
+  const b = merge(before);
+  const a = merge(after);
+  return Object.keys({ ...b, ...a })
+    .map(k => ({ name: k, before: b[k] || 0, after: a[k] || 0 }))
+    .filter(c => c.before !== c.after);
 }
 
 /** Merge switches into a settings object; returns the change log. Mutates `settings`. */
@@ -848,47 +973,80 @@ function gitIgnoreNote(projectDir, file) {
   }
 }
 
+/**
+ * Items that may be switched off at user scope. A project can turn a plugin or
+ * skill back on with `true` / "on" in its own settings, but a user-level
+ * deniedMcpServers entry merges into every project and cannot be lifted, and
+ * project-defined items only exist in their own repo.
+ */
+export function userScopeRejections(items) {
+  return items
+    .filter(it => it.kind === 'mcp' || it.scope === 'project' || it.scope === 'local')
+    .map(it => `${it.ref} ${it.name}: ${it.kind === 'mcp'
+      ? 'MCP servers are not switched off at user scope (a user-level deny cannot be re-allowed per project); see the summary guidance'
+      : 'declared for this project only'}`);
+}
+
 function cmdApply(projectDir, opts) {
   const inv = loadInventory(projectDir, opts.inv);
   const chosen = resolveRefs(inv, opts.disable);
-  const file = settingsFiles(projectDir).local;
+  const userScope = opts.scope === 'user';
+  if (opts.scope && !['user', 'project'].includes(opts.scope)) throw new Error(`--scope must be user or project, not ${opts.scope}`);
+  if (userScope) {
+    const rejected = userScopeRejections(chosen);
+    if (rejected.length) throw new Error(`cannot apply at user scope:\n- ${rejected.join('\n- ')}`);
+  }
+  const file = userScope ? settingsFiles(projectDir).user : settingsFiles(projectDir).local;
+  const undoDir = userScope ? userStateDir() : inv.state;
   const settings = readSettingsForWrite(file);
   const changes = applySwitches(settings, chosen);
   if (!changes.length) {
     console.log('Nothing to change: every requested item is already switched off.');
     return;
   }
-  const undoFile = path.join(inv.state, 'undo.json');
+  const undoFile = path.join(undoDir, 'undo.json');
   const undo = readJson(undoFile, []);
-  undo.push({ at: new Date().toISOString(), file, changes });
+  undo.push({ at: new Date().toISOString(), file, project: projectDir, changes });
   writeJsonAtomic(file, settings);
   writeJsonAtomic(undoFile, undo);
-  const L = [`Switched off ${changes.length} item(s) for this project in ${file}:`];
+  const L = [userScope
+    ? `Switched off ${changes.length} item(s) for every project in ${file}:`
+    : `Switched off ${changes.length} item(s) for this project in ${file}:`];
   for (const c of changes) L.push(`- ${c.ref} ${c.kind} ${c.name} (${c.container})`);
-  L.push('Takes effect in the next Claude Code session in this project. Undo with: restore');
-  const note = gitIgnoreNote(projectDir, file);
-  if (note) L.push(note);
+  if (userScope) {
+    L.push('A project that needs one back adds it to its own .claude/settings.local.json:');
+    L.push('  plugin: "enabledPlugins": { "<name>@<marketplace>": true }   skill: "skillOverrides": { "<name>": "on" }');
+    L.push('Takes effect in the next Claude Code session anywhere. Undo with: restore --scope user');
+  } else {
+    L.push('Takes effect in the next Claude Code session in this project. Undo with: restore');
+    const note = gitIgnoreNote(projectDir, file);
+    if (note) L.push(note);
+  }
   console.log(L.join('\n'));
 }
 
-function cmdRestore(projectDir) {
-  const state = stateDir(projectDir);
+function cmdRestore(projectDir, opts = {}) {
+  const userScope = opts.scope === 'user';
+  const state = userScope ? userStateDir() : stateDir(projectDir);
   const undoFile = path.join(state, 'undo.json');
   const undo = readJson(undoFile, []);
   if (!undo.length) {
-    console.log('Nothing to restore: cleanroom has no active changes in this project.');
+    console.log(`Nothing to restore: cleanroom has no active changes ${userScope ? 'at user scope' : 'in this project'}.`);
     return;
   }
-  const file = undo[undo.length - 1].file || settingsFiles(projectDir).local;
-  const settings = readSettingsForWrite(file);
-  const all = undo.flatMap(b => b.changes);
-  const { reverted, skipped } = revertSwitches(settings, all);
-  writeJsonAtomic(file, settings);
+  const L = [];
+  // Undo newest batch first; each batch is reverted in the file it was written to.
+  for (const batch of [...undo].reverse()) {
+    const file = batch.file || (userScope ? settingsFiles(projectDir).user : settingsFiles(projectDir).local);
+    const settings = readSettingsForWrite(file);
+    const { reverted, skipped } = revertSwitches(settings, batch.changes);
+    writeJsonAtomic(file, settings);
+    L.push(`Restored ${reverted.length} item(s) in ${file}:`);
+    for (const c of reverted) L.push(`- ${c.kind} ${c.name}`);
+    for (const c of skipped) L.push(`- skipped ${c.kind} ${c.name}: ${c.why}`);
+  }
   fs.renameSync(undoFile, path.join(state, `undo.restored-${Date.now()}.json`));
-  const L = [`Restored ${reverted.length} item(s) in ${file}:`];
-  for (const c of reverted) L.push(`- ${c.kind} ${c.name}`);
-  for (const c of skipped) L.push(`- skipped ${c.kind} ${c.name}: ${c.why}`);
-  L.push('Takes effect in the next Claude Code session in this project.');
+  L.push(`Takes effect in the next Claude Code session${userScope ? '' : ' in this project'}.`);
   console.log(L.join('\n'));
 }
 
@@ -913,8 +1071,8 @@ const USAGE = [
   'usage: cleanroom.mjs <command> --project <dir> [options]',
   '  inventory [--fast] [--no-hooks] [--wait <seconds>]',
   '  forecast  --inv <id> --disable P1,M2,S3',
-  '  apply     --inv <id> --disable P1,M2,S3',
-  '  restore',
+  '  apply     --inv <id> --disable P1,M2,S3 [--scope user]',
+  '  restore   [--scope user]',
 ].join('\n');
 
 async function main() {
@@ -925,7 +1083,7 @@ async function main() {
     case 'inventory': return cmdInventory(projectDir, opts);
     case 'forecast': return cmdForecast(projectDir, opts);
     case 'apply': return cmdApply(projectDir, opts);
-    case 'restore': return cmdRestore(projectDir);
+    case 'restore': return cmdRestore(projectDir, opts);
     default: console.error(USAGE); process.exitCode = 2;
   }
 }

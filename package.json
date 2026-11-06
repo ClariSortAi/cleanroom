@@ -1,6 +1,6 @@
 {
   "name": "cleanroom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Claude Code plugin: trim per-project context overhead from plugins, MCP servers and skills.",
   "license": "MIT",

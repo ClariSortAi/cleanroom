@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseTokens, parseContext, frontmatter, overlayFor, applySwitches, revertSwitches,
   resolveRefs, parseRunOutput, describeMcpConfig, deferredNameTokens, mcpToolPrefix, parseArgs,
-  checkInventoryId,
+  checkInventoryId, offKeysFromSettings, categoryRows, userScopeRejections,
 } from '../scripts/cleanroom.mjs';
 
 const CONTEXT_MD = `## Context Usage
@@ -185,4 +185,35 @@ test('parseArgs reads flags with and without values', () => {
   assert.deepEqual(parseArgs(['apply', '--project', 'C:\\x', '--disable', 'S1,M2', '--fast']), {
     cmd: 'apply', opts: { project: 'C:\\x', disable: 'S1,M2', fast: true },
   });
+});
+
+test('offKeysFromSettings lists exactly what a settings file switches off', () => {
+  assert.deepEqual(offKeysFromSettings({
+    enabledPlugins: { 'a@m': false, 'b@m': true },
+    skillOverrides: { x: 'off', y: 'on', z: 'user-invocable-only' },
+    deniedMcpServers: [{ serverName: 'rea' }, {}],
+  }), ['plugin:a@m', 'skill:x', 'mcp:rea']);
+  assert.deepEqual(offKeysFromSettings(undefined), []);
+});
+
+test('categoryRows merges the split skill listing into one row', () => {
+  const rows = categoryRows(
+    { Skills: 9900, 'System tools': 5700, 'MCP tools': 672, 'Free space': 1 },
+    { Skills: 4900, 'System tools': 10700, 'MCP tools': 0, 'Free space': 2 },
+  );
+  assert.deepEqual(rows, [{ name: 'MCP tools', before: 672, after: 0 }]);
+  const shrink = categoryRows({ Skills: 9000, 'System tools': 5000 }, { Skills: 3000, 'System tools': 5000 });
+  assert.deepEqual(shrink, [{ name: 'Skills + System tools (skill listing)', before: 14000, after: 8000 }]);
+});
+
+test('userScopeRejections blocks MCP servers and project-only items', () => {
+  const out = userScopeRejections([
+    { ref: 'P1', kind: 'plugin', scope: 'user', name: 'p' },
+    { ref: 'S1', kind: 'skill', scope: 'user', name: 's' },
+    { ref: 'S2', kind: 'skill', scope: 'project', name: 'proj-skill' },
+    { ref: 'M1', kind: 'mcp', scope: 'user', name: 'rea' },
+  ]);
+  assert.equal(out.length, 2);
+  assert.match(out[0], /^S2 proj-skill: declared for this project only/);
+  assert.match(out[1], /^M1 rea: MCP servers are not switched off at user scope/);
 });
