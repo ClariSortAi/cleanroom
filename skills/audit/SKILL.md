@@ -20,7 +20,7 @@ Switches go to `<project>/.claude/settings.local.json` (this project only, rever
 - Measuring runs start `claude -p` and send `/context`, a local command: no model call, no billed tokens. The `GUARD` line proves it.
 - All state lives in `<project>/.claude/cleanroom/`. Step 1 writes a `.gitignore` there that ignores the folder.
 - The Step 1 run also writes Claude Code's debug log, with MCP lines filtered out, to `.claude/cleanroom/before.debug`. The same command prints only the plugin and skill error lines and deletes the log. Never Read or print the log.
-- Never run `claude plugin list --json`, `claude mcp list`, `claude mcp get` or `/doctor` yourself, and never read `~/.claude.json`. They print server configuration or call the model.
+- Never run `claude plugin list --json`, `claude mcp list`, `claude mcp get` or `/doctor` yourself, and never read Claude Code's global config file in the home folder (only the settings files named in this skill). They print server configuration or call the model.
 - Before Step 1, tell the user: the audit runs two shell commands (measure now, forecast later), then edits the settings file and its undo log, and each step asks for permission.
 
 ## Arguments: `$ARGUMENTS`
