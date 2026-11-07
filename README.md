@@ -4,6 +4,8 @@ A Claude Code plugin that checks which plugins, MCP servers and skills are loade
 
 Every switched-on skill, MCP server and plugin adds text to every request: skill descriptions, server instructions, tool names. If you install things for one project, they ride along into all the others. cleanroom trims that per project and leaves your global setup alone.
 
+It also lists the errors Claude Code hit at startup, such as a plugin hook file with keys Claude Code doesn't recognize, a skill whose header doesn't parse, or an MCP server that failed to connect or needs you to sign in, and tells you how to fix each one.
+
 ## Install
 
 In Claude Code:
@@ -38,6 +40,7 @@ A first run with `--dry-run` shows what it would do without touching your settin
 3. Lists the items that clearly belong to another domain. These get switched off without a question.
 4. Asks about the borderline items four at a time, largest first, with a recommendation on each.
 5. Measures the plan before writing anything, then writes the switches and prints a summary: tokens saved per request and per 50-request session, a before/after table by category, and what it could not touch.
+6. Lists the startup load errors with a fix for each. A failing MCP server can be switched off like any other item. For a broken plugin, it gives you the update, uninstall or bug-report steps, but it doesn't edit the plugin or run those commands. For one of your own skills with a broken header, it shows the corrected line and applies it if you ask.
 
 Changes take effect the next time you start Claude Code in that project.
 
@@ -47,7 +50,7 @@ cleanroom is a single skill with no scripts. Claude runs the measuring commands 
 
 Claude starts `claude -p` in the background and sends it `/context`. That is a local command, so no model call is made and no tokens are billed, and the output includes a check that proves it. The run waits 20 seconds before asking, so stdio MCP servers have time to connect, and 45 if some were still connecting.
 
-The first run gives a cost estimate for each item, read from the `/context` tables. To check the plan, Claude runs `/context` twice more with the proposed switches passed as a temporary `--settings` file: once with everything, once without the skills. The before and after totals in the summary come from those runs. Nothing is written to your settings while forecasting.
+The first run gives a cost estimate for each item, read from the `/context` tables. It also writes Claude Code's debug log, leaving out MCP server lines. Claude sees only the plugin and skill error lines from it, and the same command deletes the log. To check the plan, Claude runs `/context` twice more with the proposed switches passed as a temporary `--settings` file: once with everything, once without the skills. The before and after totals in the summary come from those runs. Nothing is written to your settings while forecasting.
 
 Some costs don't show up directly in `/context`. Here is how cleanroom handles them:
 
@@ -89,6 +92,7 @@ For plugins and skills, the audit can make the change for you if you say yes. It
 - Custom agents. Claude Code has no per-project switch that removes an agent from context, so the summary only lists their cost.
 - Memory files (CLAUDE.md, auto memory). The summary flags any over 5,000 tokens.
 - Plugins loaded with `--plugin-dir`.
+- Other plugins' files. Switching a plugin off doesn't silence a warning about its hook file, because Claude Code reads the hook files of every installed plugin at startup. cleanroom gives you the update or uninstall command to run yourself, or the author's link so you can report it.
 - Items declared for the project itself (project skills, `.mcp.json` and local-scope servers, plugins enabled in project settings). The audit can ask about these, but never removes them on its own.
 - Anything in an empty project. With no signals to judge by, it only asks.
 
@@ -102,11 +106,13 @@ Claude reads:
 - The same two settings files in sibling folders of the project (for example `C:\Dev\*` for `C:\Dev\myapp`), to spot items you already switch off elsewhere. Only the switched-off keys reach the conversation.
 - The `SKILL.md` descriptions of your installed skills and the manifests of your installed plugins.
 - The `/context` output and the list of MCP servers and plugins that the headless run reports. These show server and tool names, not server configuration.
+- The plugin and skill error lines from the measuring run's debug log, and the version, scope and status that `claude plugin list` shows for the plugins those lines name. MCP server lines never go into the log, and the log is deleted right after.
 
 It writes:
 
 - `<project>/.claude/settings.local.json`, with the switches.
-- `<project>/.claude/cleanroom/`, with the measurement output, forecast settings and undo log. You can delete the folder at any time, but `restore` needs the undo log.
+- `<project>/.claude/cleanroom/`, with the measurement output, forecast settings and undo log, plus the debug log for the few seconds before it is deleted. You can delete the folder at any time, but `restore` needs the undo log.
+- A skill file of your own, only when you ask cleanroom to fix its header.
 - `~/.claude/settings.json` and `~/.claude/cleanroom/user-undo.json`, only after you say yes to switching items off everywhere.
 
 What Claude reads goes into your Claude Code conversation, like any other file it reads during a session.
