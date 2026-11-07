@@ -1,7 +1,7 @@
 {
   "name": "cleanroom",
-  "version": "1.0.0",
-  "description": "Audit the plugins, MCP servers and skills loaded in a project, switch off the irrelevant ones for that project only, ask about borderline ones four at a time, and report measured token savings.",
+  "version": "1.1.0",
+  "description": "Audit the plugins, MCP servers and skills loaded in a project, switch off the irrelevant ones for that project only, ask about borderline ones four at a time, report measured token savings, and list startup load errors with fixes.",
   "author": {
     "name": "Jason Rivard"
   },

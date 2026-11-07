@@ -1,6 +1,6 @@
 ---
 name: audit
-description: Audit the plugins, MCP servers and skills loaded in this project, switch off the irrelevant ones for this project only, ask about borderline ones four at a time, and report measured token savings. Arguments - restore, --dry-run.
+description: Audit the plugins, MCP servers and skills loaded in this project, switch off the irrelevant ones for this project only, ask about borderline ones four at a time, report measured token savings, and list startup load errors with fixes. Arguments - restore, --dry-run.
 argument-hint: "[--dry-run] [restore]"
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep
@@ -19,6 +19,8 @@ Switches go to `<project>/.claude/settings.local.json` (this project only, rever
 - Set the Bash timeout to 300000 ms for the Step 1 and Step 5 commands. Each takes 25-50 s.
 - Measuring runs start `claude -p` and send `/context`, a local command: no model call, no billed tokens. The `GUARD` line proves it.
 - All state lives in `<project>/.claude/cleanroom/`. Step 1 writes a `.gitignore` there that ignores the folder.
+- The Step 1 run also writes Claude Code's debug log, with MCP lines filtered out, to `.claude/cleanroom/before.debug`. The same command prints only the plugin and skill error lines and deletes the log. Never Read or print the log.
+- Never run `claude plugin list --json`, `claude mcp list`, `claude mcp get` or `/doctor` yourself, and never read `~/.claude.json`. They print server configuration or call the model.
 - Before Step 1, tell the user: the audit runs two shell commands (measure now, forecast later), then edits the settings file and its undo log, and each step asks for permission.
 
 ## Arguments: `$ARGUMENTS`
@@ -31,8 +33,8 @@ Switches go to `<project>/.claude/settings.local.json` (this project only, rever
 Run:
 
 ```bash
-mkdir -p .claude/cleanroom && printf '*\n' > .claude/cleanroom/.gitignore
-(sleep 20; printf '%s\n' '{"type":"user","message":{"role":"user","content":"/context"}}') | claude -p --input-format stream-json --output-format stream-json --verbose --no-session-persistence --permission-mode default > .claude/cleanroom/before.jsonl 2> .claude/cleanroom/before.err
+mkdir -p .claude/cleanroom && printf '*\n' > .claude/cleanroom/.gitignore && rm -f .claude/cleanroom/before.debug .claude/cleanroom/latest
+(sleep 20; printf '%s\n' '{"type":"user","message":{"role":"user","content":"/context"}}') | claude -p --input-format stream-json --output-format stream-json --verbose --no-session-persistence --permission-mode default --debug='!mcp' --debug-file .claude/cleanroom/before.debug > .claude/cleanroom/before.jsonl 2> .claude/cleanroom/before.err
 grep -q '"type":"result"' .claude/cleanroom/before.jsonl || { echo "NO RESULT"; head -20 .claude/cleanroom/before.err; }
 awk '
 function tok(x) { gsub(/[ ~,]/, "", x); if (x ~ /^</) return 10; m = 1; if (x ~ /k$/) { m = 1000; sub(/k$/, "", x) } return x * m }
@@ -52,6 +54,8 @@ function row(L,  f, s, t) {
   if (match($(0), /"plugins":\[[^]]*\]/)) print substr($(0), RSTART, RLENGTH)
   r = $(0); p = ""; while (match(r, /"name":"[^"]*","status":"pending"/)) { p = p " " substr(r, RSTART + 8, RLENGTH - 28); r = substr(r, RSTART + RLENGTH) }
   print "PENDING:" (p == "" ? " none" : p)
+  r = $(0); e = ""; while (match(r, /"name":"[^"]*","status":"(failed|needs-auth)"/)) { q = substr(r, RSTART + 8, RLENGTH - 9); sub(/","status":"/, " (", q); e = e (e == "" ? " " : "; ") q ")"; r = substr(r, RSTART + RLENGTH) }
+  print "MCP_ERRORS:" (e == "" ? " none" : e)
 }
 /"type":"result"/ {
   g = "GUARD"; if (match($(0), /"num_turns":[0-9]+/)) g = g " " substr($(0), RSTART, RLENGTH)
@@ -68,13 +72,20 @@ echo "## Recent commits"; git log -12 --format=%s 2>/dev/null
 echo "## Switched off in this repo"; cat .claude/settings.json .claude/settings.local.json 2>/dev/null | grep -Eo '"[^"]*": *("off"|false)|"serverName": *"[^"]*"' | sort -u | wc -l
 echo "## Switched off in 2+ sibling repos (repos, key)"; here=$(basename "$PWD")
 for d in ../*/; do [ "$d" = "../$here/" ] && continue; cat "$d.claude/settings.json" "$d.claude/settings.local.json" 2>/dev/null | grep -Eo '"[^"]*": *("off"|false)|"serverName": *"[^"]*"' | tr -d ' ' | sort -u; done | sort | uniq -c | sort -rn | grep -v '^ *1 ' | head -80
+echo "## Load errors"; f=.claude/cleanroom/before.debug; k='hooks\.json|manifest|Failed to load|failed to parse|path not found|escapes plugin'
+grep -E '\[ERROR\] ' "$f" 2>/dev/null | grep -E "$k" | sed -E 's/^.*\[ERROR\] //; s#[a-z]+://[^ ]*#<url>#g' | cut -c1-300 | sort -u
+echo "Other logged errors: $(grep -E '\[ERROR\] ' "$f" 2>/dev/null | grep -v -E "$k|CA certs" | wc -l)"
+pl=$(claude plugin list 2>/dev/null); for p in $(grep -E '\[ERROR\] ' "$f" 2>/dev/null | grep -E "$k" | sed -nE 's/^.*\[ERROR\] (Plugin )?([A-Za-z0-9._-]+)(:| has).*/\2/p' | sort -u); do echo "== $p"; printf '%s\n' "$pl" | grep -A3 -F " $p@" || echo "   not installed"; done
+rm -f "$f" .claude/cleanroom/latest
 ```
 
 Then:
 - `NO RESULT`: show the error lines and stop.
 - `GUARD` shows `num_turns` or `total_cost_usd` other than 0: stop. Tell the user `/context` reached the model, so the measurement is invalid.
 - `PENDING` lists servers: run the whole Step 1 command once more with `sleep 45` instead of `sleep 20`, and use `sleep 45` in Step 5 too. Servers still pending after that: note them; their cost is unknown.
-- Read the whole output. It holds the `mcp_servers` and `plugins` lists, the `/context` report with one row per MCP server, the `SKILLS` counts, recent commits, and the account-wide counts.
+- `MCP_ERRORS` lists servers, or `## Load errors` has lines: handle them in Step 2a.
+- `Other logged errors` above 0: say so in one line in the summary; `claude --debug` shows them.
+- Read the whole output. It holds the `mcp_servers` and `plugins` lists, the `/context` report with one row per MCP server, the `SKILLS` counts, recent commits, the account-wide counts, and the load errors.
 
 ## Step 2: Build the candidate list
 
@@ -94,6 +105,20 @@ Gather descriptions and project signals with Read, Glob and Grep only:
 - Project: Glob the top level and `**/*` (ignore `.git`, `.claude`, `node_modules`); Read manifests (`package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `*.csproj`, `Gemfile`, `composer.json`, `pom.xml`), `CLAUDE.md` or `AGENTS.md`, and the README. Use the recent commits from Step 1.
 - `EMPTY PROJECT`: fewer than 3 files outside `.git` and `.claude`.
 - Existing switches: Read `.claude/settings.local.json` and `.claude/settings.json` if they exist.
+
+## Step 2a: Load errors
+
+Assign refs `E1..` to each `MCP_ERRORS` server and each `## Load errors` line. Record who owns the fix (the user, a plugin author, or the server) and the fix.
+
+- Never edit, move or delete files under `~/.claude/plugins`. Never run `claude plugin update`, `uninstall` or `marketplace` commands; print them for the user. Never fetch repository or issue pages; print the URL.
+- `<plugin>: hooks.json: unknown keys ... ignored`: Claude Code ignores those keys and still loads the hooks. It reads the hooks file of every installed plugin, so switching the plugin off does not clear the warning. Fixes, in order:
+  - Update: `claude plugin marketplace update <marketplace>`, then `claude plugin update <plugin>@<marketplace>`.
+  - If the user does not use it: `claude plugin uninstall <plugin>@<marketplace> --scope <Scope>`. Say that this deletes the plugin's data unless `--keep-data` is added, and that `restore` cannot undo it.
+  - Report it: Read `~/.claude/plugins/cache/<marketplace>/<plugin>/<Version>/.claude-plugin/plugin.json` (Version and Scope come from the `== <plugin>` block) and give its `repository` or `homepage` URL.
+- `Plugin <name> has a corrupt manifest`, `Failed to load`, `path not found`, `escapes plugin directory`: parts of the plugin are missing or broken. Same fixes. `not installed` means a folder loaded with `--plugin-dir`; tell the user to fix that folder.
+- `[skills] YAML frontmatter in <path> failed to parse`: Read the first 10 lines of `<path>` and name the cause (usually an unquoted `: ` inside `description`; wrap the value in double quotes). Show the corrected line as text. When `<path>` is under `~/.claude/skills` or this project's `.claude/skills` and the user asks, apply it with the Edit tool. When it is under `~/.claude/plugins`, give the plugin author's URL instead. Switching the skill off does not clear this error.
+- MCP server `failed`: classify it like any other server. Switching it off also stops the failed connection at startup. If it stays on: `/mcp`, select the server, read its error, then Reconnect.
+- MCP server `needs-auth`: if it stays on, `/mcp`, select it, Authenticate. For a `claude.ai` connector, connect it on claude.ai under Settings > Connectors.
 
 ## Step 3: Classify every candidate
 
@@ -126,6 +151,7 @@ Show the `remove` set as a compact table: ref, kind, name, est. tokens, one-line
   - Skill while the listing is FULL:
     - `question`: `Skill <name>: <what it does, one clause>. <how it could trigger wrongly here>. Switch it off for this project? (No token saving: the skill listing is full.)`
     - `Switch off` description: `Frees description room for the other skills; no token saving. /cleanroom:audit restore undoes it.`
+  - MCP server listed in `MCP_ERRORS`: add `It failed to connect at startup.` or `It needs sign-in.` to the question.
   - `Keep` description: the most plausible use in this project.
   - Put your recommendation first with ` (Recommended)` appended to its label. While the listing is FULL, recommend `Keep` for skills unless wrong triggering is likely.
 - Never state a token saving for a skill while the listing is FULL.
@@ -193,7 +219,8 @@ Present in this order:
 5. Kept as relevant: names with the signal, one line each, at most 10 (then `+N more`).
 6. Category before/after table from Step 5.
 7. Not switchable per project (built-in skills, agents, memory files, inline plugins) with their token counts, as one short list. If a memory file is over 5k tokens, say it is the next biggest lever.
-8. Next steps: restart Claude Code in this project to apply; `/cleanroom:audit restore` to undo; any `.gitignore` note.
+8. Load errors: one line per `E` ref with the message (shortened), the owner, and the fix or commands to run. Otherwise `No load errors.`
+9. Next steps: restart Claude Code in this project to apply; `/cleanroom:audit restore` to undo; any `.gitignore` note.
 
 Quote measured numbers from Step 5; never invent or round them further. Mark per-item numbers as estimates.
 
